@@ -50,8 +50,8 @@
 /* % error to trigger increase */
 #define SEDA_ERR_I			-0.5
 /* additive rate increase */
-#define SEDA_ADJ_I			4.0
+#define SEDA_ADJ_I			40
 /* multiplicative rate decrease */
-#define SEDA_ADJ_D			1.1
+#define SEDA_ADJ_D			1.04
 /* weight on additive increase */
 #define SEDA_CI				-0.1
