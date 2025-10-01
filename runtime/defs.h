@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <sched.h>
+
 #include <base/stddef.h>
 #include <base/list.h>
 #include <base/mem.h>
@@ -23,22 +25,21 @@
 #include <runtime/rcu.h>
 #include <runtime/preempt.h>
 
-
 /*
  * constant limits
  * TODO: make these configurable?
  */
 
 #define RUNTIME_MAX_THREADS		100000
-#define RUNTIME_STACK_SIZE		256 * KB
-#define RUNTIME_GUARD_SIZE		256 * KB
+#define RUNTIME_STACK_SIZE		256 * SIZE_KB
+#define RUNTIME_GUARD_SIZE		256 * SIZE_KB
 #define RUNTIME_RQ_SIZE			32
 #define RUNTIME_MAX_TIMERS		4096
 #define RUNTIME_SCHED_POLL_ITERS	0
-#define RUNTIME_SCHED_MIN_POLL_US	2
+#define RUNTIME_SCHED_MIN_POLL_US	10
 #define RUNTIME_WATCHDOG_US		50
-#define RUNTIME_RX_BATCH_SIZE		32
-
+#define RUNTIME_RX_BATCH_SIZE           32
+#define RUNTIME_PAUSE_THS_MAX_WAIT_US   100
 
 /*
  * Trap frame support
@@ -72,6 +73,7 @@ struct thread_tf {
 	uint64_t rax;	/* holds return value */
 	uint64_t rip;	/* instruction pointer */
 	uint64_t rsp;	/* stack pointer */
+	uint64_t stack_protector;
 };
 
 #define ARG0(tf)        ((tf)->rdi)
@@ -86,26 +88,41 @@ struct thread_tf {
  * Thread support
  */
 
+#define MAX_NUM_RCUS_HELD       3
+
 struct stack;
 
-struct thread {
+struct rcu_context {
+	void *rcu;
+	int32_t nesting_cnt;
+	bool flag;
+};
+
+struct thread_nu_state {
+	uint32_t                creator_ip;
+	uint32_t                monitor_cnt;
+	void                    *owner_proclet;
+	void                    *proclet_slab;
+	struct rcu_context      rcu_ctxs[MAX_NUM_RCUS_HELD];
 	struct thread_tf	tf;
+};
+
+struct thread {
 	struct list_node	link;
 	struct stack		*stack;
 	unsigned int		main_thread:1;
 	unsigned int		thread_ready;
 	unsigned int		thread_running;
 	unsigned int		last_cpu;
-	void			*rpc_ctx;
-	uint64_t		run_start_tsc;
+	uint64_t                run_start_tsc;
 	uint64_t		ready_tsc;
-	uint64_t		tlsvar;
-	uint64_t		acc_qdel;
-	uint64_t		enque_ts;
 #ifdef GC
 	struct list_node	gc_link;
 	unsigned int		onk;
 #endif
+	bool                    wq_spin;
+	bool                    migrated;
+	struct thread_nu_state  nu_state;
 };
 
 typedef void (*runtime_fn_t)(void);
@@ -114,11 +131,10 @@ typedef void (*runtime_fn_t)(void);
 extern void __jmp_thread(struct thread_tf *tf) __noreturn;
 extern void __jmp_thread_direct(struct thread_tf *oldtf,
 				struct thread_tf *newtf,
-				unsigned int *thread_running);
+			        unsigned int *thread_running);
 extern void __jmp_runtime(struct thread_tf *tf, runtime_fn_t fn,
 			  void *stack);
 extern void __jmp_runtime_nosave(runtime_fn_t fn, void *stack) __noreturn;
-
 
 /*
  * Stack support
@@ -186,6 +202,18 @@ static inline uint64_t stack_init_to_rsp(struct stack *s, void (*exit_fn)(void))
 	return rsp;
 }
 
+static inline uint64_t nu_stack_init_to_rsp(void *stack)
+{
+	uint64_t rsp;
+
+	/* setup for usage as stack */
+	stack -= sizeof(void *);
+	*((void **)stack) = NULL; /* never returns */
+	rsp = (uint64_t)stack;
+	assert_rsp_aligned(rsp);
+	return rsp;
+}
+
 /**
  * stack_init_to_rsp_with_buf - sets up an exit handler and returns the top of
  * the stack, reserving space for a buffer above
@@ -214,7 +242,6 @@ stack_init_to_rsp_with_buf(struct stack *s, void **buf, size_t buf_len,
 	return rsp;
 }
 
-
 /*
  * ioqueues
  */
@@ -231,7 +258,6 @@ struct iokernel_control {
 
 extern struct iokernel_control iok;
 extern void *iok_shm_alloc(size_t size, size_t alignment, shmptr_t *shm_out);
-
 
 /*
  * Direct hardware queue support
@@ -261,7 +287,6 @@ static inline bool hardware_q_pending(struct hardware_q *q)
 
 	return parity == hd_parity;
 }
-
 
 /*
  * Storage support
@@ -385,12 +410,8 @@ struct kthread {
 	struct mbufq		txcmdq_overflow;
 	unsigned int		rcu_gen;
 	unsigned int		curr_cpu;
-#ifdef GC
-	uint64_t		local_gc_gen;
-	unsigned long		pad1[1];
-#else
-	unsigned long		pad1[2];
-#endif
+	thread_t		*curr_th;
+	atomic_t                iokernel_softirq_busy;
 
 	/* 3rd cache-line */
 	struct lrpc_chan_out	txpktq;
@@ -407,21 +428,29 @@ struct kthread {
 	thread_t		*directpath_softirq;
 	thread_t		*timer_softirq;
 	thread_t		*storage_softirq;
-	bool			iokernel_busy;
-	bool			directpath_busy;
-	bool			timer_busy;
-	bool			storage_busy;
-	unsigned int		pad2[3];
+	struct preemptor        *preemptor;
+	bool			iokernel_sched;
+	bool			directpath_sched;
+	bool			timer_sched;
+	bool			storage_sched;
+	atomic_t                directpath_busy;
 
 	/* 9th cache-line, storage nvme queues */
 	struct storage_q	storage_q;
 
-	/* 10th cache-line, direct path queues */
-	struct hardware_q	*directpath_rxq;
-	struct direct_txq	*directpath_txq;
-	unsigned long		pad3[6];
+	/* 10th cache-line, direct path TX queues */
+	struct direct_txq	*directpath_txq[ETH_VLAN_MAX_PCP];
 
-	/* 11th cache-line, statistics counters */
+	/* 11th cache-line, direct path RX queues and some nu stuff */
+	struct hardware_q	*directpath_rxq;
+	struct list_head        migrating_ths;
+	struct list_head	rq_deprioritized;
+	bool                    pause_req;
+	bool                    prioritize_req;
+	uint64_t                last_softirq_tsc;
+	bool                    runtime_preempt_req;
+
+	/* 12th cache-line, statistics counters */
 	uint64_t		stats[STAT_NR];
 };
 
@@ -432,10 +461,12 @@ BUILD_ASSERT(offsetof(struct kthread, txpktq) % CACHE_LINE_SIZE == 0);
 BUILD_ASSERT(offsetof(struct kthread, rq) % CACHE_LINE_SIZE == 0);
 BUILD_ASSERT(offsetof(struct kthread, timer_lock) % CACHE_LINE_SIZE == 0);
 BUILD_ASSERT(offsetof(struct kthread, storage_q) % CACHE_LINE_SIZE == 0);
+BUILD_ASSERT(offsetof(struct kthread, directpath_txq) % CACHE_LINE_SIZE == 0);
 BUILD_ASSERT(offsetof(struct kthread, directpath_rxq) % CACHE_LINE_SIZE == 0);
 BUILD_ASSERT(offsetof(struct kthread, stats) % CACHE_LINE_SIZE == 0);
 
 extern __thread struct kthread *mykthread;
+extern unsigned int fg_map[NCPU];
 
 /**
  * myk - returns the per-kernel-thread data
@@ -465,16 +496,48 @@ static inline void putk(void)
 	preempt_enable();
 }
 
+/* preempt_cede_needed - check if kthread should cede */
+static inline bool preempt_cede_needed(struct kthread *k)
+{
+	return ACCESS_ONCE(k->q_ptrs->curr_grant_gen) ==
+	       ACCESS_ONCE(k->q_ptrs->cede_gen);
+}
+
+/* preempt_yield_needed - check if current uthread should yield */
+static inline bool preempt_yield_needed(struct kthread *k)
+{
+        return ACCESS_ONCE(k->q_ptrs->yield_rcu_gen) == k->rcu_gen ||
+               k->runtime_preempt_req;
+}
+
+static inline void set_preempt_yield_needed(struct kthread *k)
+{
+        ACCESS_ONCE(k->runtime_preempt_req) = true;
+}
+
+static inline void clear_preempt_yield_needed(struct kthread *k)
+{
+        ACCESS_ONCE(k->runtime_preempt_req) = false;
+}
+
 DECLARE_SPINLOCK(klock);
 extern unsigned int spinks;
-extern unsigned int nrks;
+extern unsigned int maxks;
+extern unsigned int guaranteedks;
 extern struct kthread *ks[NCPU];
 extern bool cfg_prio_is_lc;
 extern uint64_t cfg_ht_punish_us;
 extern uint64_t cfg_qdelay_us;
+extern uint64_t cfg_quantum_us;
+extern bool cfg_react_cpu_pressure;
+extern bool cfg_react_mem_pressure;
 
 extern void kthread_park(bool voluntary);
 extern void kthread_wait_to_attach(void);
+extern void kthread_yield_all_cores(void);
+extern bool kthread_enqueue_intr(cpu_set_t *mask, struct kthread *k);
+extern void kthread_enqueue_yield_intr(cpu_set_t *mask, struct kthread *k);
+extern void kthread_send_yield_intrs(cpu_set_t *mask);
 
 struct cpu_record {
 	struct kthread *recent_kthread;
@@ -496,16 +559,28 @@ extern int preferred_socket;
  */
 #define STAT(counter) (myk()->stats[STAT_ ## counter])
 
+extern unsigned int eth_mtu;
+
+/**
+ * net_get_mtu - gets the ethernet MTU (maximum transmission unit)
+ */
+static inline unsigned int net_get_mtu(void)
+{
+	return eth_mtu;
+}
+
 
 /*
  * Softirq support
  */
 
 extern bool disable_watchdog;
-extern bool softirq_pending(struct kthread *k);
-extern bool softirq_sched(struct kthread *k);
+extern bool softirq_pending(struct kthread *k, uint64_t now_tsc);
+extern bool softirq_run_locked(struct kthread *k);
 extern bool softirq_run(void);
-
+extern bool softirq_run_preempt_disabled(void);
+extern bool softirq_directpath_pending(struct kthread *k);
+extern void directpath_softirq_one(struct kthread *k);
 
 /*
  * Network stack
@@ -535,6 +610,7 @@ extern struct cfg_arp_static_entry static_entries[MAX_ARP_STATIC_ENTRIES];
 
 extern void net_rx_softirq(struct rx_net_hdr **hdrs, unsigned int nr);
 extern void net_rx_softirq_direct(struct mbuf **ms, unsigned int nr);
+extern void iokernel_softirq_poll(struct kthread *k);
 
 struct trans_entry;
 struct net_driver_ops {
@@ -544,6 +620,7 @@ struct net_driver_ops {
 	int (*register_flow)(unsigned int affininty, struct trans_entry *e, void **handle_out);
 	int (*deregister_flow)(struct trans_entry *e, void *handle);
 	uint32_t (*get_flow_affinity)(uint8_t ipproto, uint16_t local_port, struct netaddr remote);
+	int (*rxq_has_work)(struct hardware_q *rxq);
 };
 
 extern struct net_driver_ops net_ops;
@@ -551,11 +628,12 @@ extern struct net_driver_ops net_ops;
 #ifdef DIRECTPATH
 
 extern bool cfg_directpath_enabled;
+extern char directpath_arg[128];
 struct direct_txq {};
 
 static inline bool rx_pending(struct hardware_q *rxq)
 {
-	return cfg_directpath_enabled && hardware_q_pending(rxq);
+	return cfg_directpath_enabled && net_ops.rxq_has_work(rxq);
 }
 
 extern size_t directpath_rx_buf_pool_sz(unsigned int nrqs);
@@ -573,17 +651,6 @@ static inline size_t directpath_rx_buf_pool_sz(unsigned int nrqs)
 }
 
 #endif
-
-extern unsigned int eth_mtu;
-
-/**
- * net_get_mtu - gets the ethernet MTU (maximum transmission unit)
- */
-static inline unsigned int net_get_mtu(void)
-{
-	return eth_mtu;
-}
-
 
 /*
  * Runtime configuration infrastructure
@@ -604,7 +671,6 @@ void register_cfg_init_##c (void)				\
 	extern void cfg_register(struct cfg_handler *h);	\
 	cfg_register(&c);					\
 }
-
 
 /*
  * Init
@@ -655,5 +721,5 @@ extern void sched_start(void) __noreturn;
 extern int thread_spawn_main(thread_fn_t fn, void *arg);
 extern void thread_cede(void);
 extern void thread_ready_locked(thread_t *th);
-extern void thread_ready_head_locked(thread_t *th);
+extern void thread_ready_head_locked(thread_t *th, uint64_t ready_tsc);
 extern void join_kthread(struct kthread *k);
