@@ -114,6 +114,9 @@ struct thread {
 	unsigned int		thread_ready;
 	unsigned int		thread_running;
 	unsigned int		last_cpu;
+	void			*rpc_ctx;
+	uint64_t		acc_qdel;
+	uint64_t		enque_ts;
 	uint64_t                run_start_tsc;
 	uint64_t		ready_tsc;
 #ifdef GC

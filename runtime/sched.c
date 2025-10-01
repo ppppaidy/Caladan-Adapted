@@ -17,6 +17,12 @@
 
 #include "defs.h"
 
+/* global credit pool */
+atomic_t srpc_credit_pool;
+
+/* global credit used */
+atomic_t srpc_credit_used;
+
 const int thread_link_offset = offsetof(struct thread, link);
 const int thread_monitor_cnt_offset =
        offsetof(struct thread, nu_state) +
@@ -63,6 +69,46 @@ LIST_HEAD(all_migrating_ths);
  */
 thread_t *thread_self(void);
 
+uint64_t get_acc_qdel(void)
+{
+	BUG_ON(!__self);
+	return __self->acc_qdel;
+}
+
+uint64_t get_acc_qdel_us(void)
+{
+	return get_acc_qdel() / cycles_per_us;
+}
+
+void set_acc_qdel(uint64_t del)
+{
+	BUG_ON(!__self);
+	__self->acc_qdel = del;
+}
+
+void incr_acc_qdel(uint64_t del)
+{
+	BUG_ON(!__self);
+	__self->acc_qdel += del;
+}
+
+void incr_acc_qdel_us(uint64_t us)
+{
+	incr_acc_qdel(us * cycles_per_us);
+}
+
+void set_rpc_ctx(void *c)
+{
+	BUG_ON(!__self);
+	__self->rpc_ctx = c;
+}
+
+void *get_rpc_ctx(void)
+{
+	BUG_ON(!__self);
+	return __self->rpc_ctx;
+}
+
 /**
  * cores_have_affinity - returns true if two cores have cache affinity
  * @cpua: the first core
@@ -94,6 +140,7 @@ static __noreturn void jmp_thread(thread_t *th)
 			cpu_relax();
 	}
 	th->thread_running = true;
+	th->acc_qdel += (rdtsc() - th->enque_ts);
 	__jmp_thread(&th->nu_state.tf);
 }
 
@@ -118,6 +165,7 @@ static void jmp_thread_direct(thread_t *oldth, thread_t *newth)
 			cpu_relax();
 	}
 	newth->thread_running = true;
+	newth->acc_qdel += (rdtsc() - newth->enque_ts);
 	__jmp_thread_direct(&oldth->nu_state.tf, &newth->nu_state.tf,
 			    &oldth->thread_running);
 }
@@ -881,6 +929,7 @@ static void thread_ready_prepare(struct kthread *k, thread_t *th)
 	/* prepare thread to be runnable */
 	th->thread_ready = true;
 	th->ready_tsc = rdtsc();
+	th->enque_ts = rdtsc();
 	if (cores_have_affinity(th->last_cpu, k->curr_cpu))
 		STAT(LOCAL_WAKES)++;
 	else
@@ -1117,6 +1166,9 @@ static __always_inline thread_t *__thread_create(void)
 	th->main_thread = false;
 	th->thread_ready = false;
 	th->thread_running = false;
+	th->rpc_ctx = NULL;
+	th->acc_qdel = 0;
+	th->enque_ts = 0;
 	th->wq_spin = false;
 	th->migrated = false;
 	memset(th->nu_state.rcu_ctxs, 0, sizeof(th->nu_state.rcu_ctxs));

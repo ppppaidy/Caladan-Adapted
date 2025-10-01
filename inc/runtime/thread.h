@@ -69,6 +69,14 @@ static inline thread_id_t get_thread_id(thread_t *th)
 extern uint64_t get_uthread_specific(void);
 extern void set_uthread_specific(uint64_t val);
 
+extern uint64_t get_acc_qdel(void);
+extern uint64_t get_acc_qdel_us(void);
+extern void set_acc_qdel(uint64_t del);
+extern void incr_acc_qdel(uint64_t del);
+extern void incr_acc_qdel_us(uint64_t us);
+extern void set_rpc_ctx(void *c);
+extern void *get_rpc_ctx(void);
+
 /*
  * High-level routines, use this API most of the time.
  */

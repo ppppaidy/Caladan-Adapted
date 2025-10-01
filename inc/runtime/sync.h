@@ -19,10 +19,13 @@ struct mutex {
 	atomic_t		held;
 	spinlock_t		waiter_lock;
 	struct list_head	waiters;
+	uint64_t		oldest_tsc;
 };
 
 typedef struct mutex mutex_t;
 
+extern uint64_t mutex_queue_tsc(mutex_t *m);
+extern uint64_t mutex_queue_us(mutex_t *m);
 extern void __mutex_lock(mutex_t *m);
 extern void __mutex_unlock(mutex_t *m);
 extern void mutex_init(mutex_t *m);
@@ -200,6 +203,7 @@ static inline void assert_timed_mutex_held(timed_mutex_t *m)
 struct condvar {
 	spinlock_t		waiter_lock;
 	struct list_head	waiters;
+	uint64_t		oldest_tsc;
 };
 
 typedef struct condvar condvar_t;
@@ -208,6 +212,9 @@ extern void condvar_wait(condvar_t *cv, mutex_t *m);
 extern void condvar_signal(condvar_t *cv);
 extern void condvar_broadcast(condvar_t *cv);
 extern void condvar_init(condvar_t *cv);
+
+extern uint64_t condvar_queue_tsc(condvar_t *cv);
+extern uint64_t condvar_queue_us(condvar_t *cv);
 
 /*
  * A condition variable variant that supports wait_for() and wait_until().
