@@ -1,4 +1,4 @@
-// rpc++.h - support for remote procedure calls (RPCs)
+// rpc.h - support for remote procedure calls (RPCs)
 
 #pragma once
 
@@ -21,36 +21,27 @@ class RpcClient {
   RpcClient& operator=(const RpcClient&) = delete;
 
   // Creates an RPC session.
-  static RpcClient *Dial(netaddr raddr, int id,
-			 crpc_ldrop_fn_t ldrop_handler,
-			 crpc_rdrop_fn_t rdrop_handler,
-			 struct rpc_session_info *info);
-
-  int AddConnection(netaddr raddr);
+  static RpcClient *Dial(netaddr raddr, int id);
 
   // Sends an RPC request.
-  ssize_t Send(const void *buf, size_t len, int hash,
-	       void *arg = nullptr);
+  ssize_t Send(const void *buf, size_t len, int hash);
 
   // Receives an RPC request.
-  ssize_t Recv(void *buf, size_t len, int conn_idx = 0,
-	       void *arg = nullptr);
+  ssize_t Recv(void *buf, size_t len, uint64_t *latency);
 
-  int NumConns();
-
-  uint32_t Credit();
+  uint32_t WinAvail();
 
   void StatClear();
 
-  uint64_t StatEcreditRx();
+  uint64_t StatWinuRx();
 
-  uint64_t StatCupdateTx();
+  uint64_t StatWinuTx();
 
   uint64_t StatRespRx();
 
   uint64_t StatReqTx();
 
-  uint64_t StatCreditExpired();
+  uint64_t StatWinExpired();
 
   uint64_t StatReqDropped();
 
@@ -72,9 +63,9 @@ class RpcClient {
 // Can only be called once.
 int RpcServerEnable(std::function<void(struct srpc_ctx *)> f);
 
-uint64_t RpcServerStatCupdateRx();
-uint64_t RpcServerStatEcreditTx();
-uint64_t RpcServerStatCreditTx();
+uint64_t RpcServerStatWinuRx();
+uint64_t RpcServerStatWinuTx();
+uint64_t RpcServerStatWinTx();
 uint64_t RpcServerStatReqRx();
 uint64_t RpcServerStatReqDropped();
 uint64_t RpcServerStatRespTx();

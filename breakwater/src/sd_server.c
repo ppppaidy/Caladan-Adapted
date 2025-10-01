@@ -20,7 +20,6 @@
 
 #include "util.h"
 #include "sd_proto.h"
-#include "bw2_config.h"
 
 /* the maximum supported window size */
 #define SSD_MAX_WINDOW_EXP	6
@@ -93,6 +92,9 @@ struct ssd_session {
 };
 
 /* credit-related stats */
+atomic64_t srpc_stat_winu_rx_;
+atomic64_t srpc_stat_winu_tx_;
+atomic64_t srpc_stat_win_tx_;
 atomic64_t srpc_stat_req_rx_;
 atomic64_t srpc_stat_req_dropped_;
 atomic64_t srpc_stat_resp_tx_;
@@ -201,6 +203,7 @@ static int srpc_send_completion_vector(struct ssd_session *s,
 #endif
 	atomic_sub_and_fetch(&srpc_num_pending, nrhdr);
 	atomic64_fetch_and_add(&srpc_stat_resp_tx_, nrhdr);
+	atomic64_fetch_and_add(&srpc_stat_win_tx_, 0);
 
 	if (unlikely(ret < 0))
 		return ret;
@@ -214,37 +217,16 @@ static void srpc_worker(void *arg)
 	uint64_t st = microtime();
 	thread_t *th;
 
-	set_rpc_ctx((void *)&c->cmn);
-	set_acc_qdel(runtime_queue_us() * cycles_per_us);
-	c->cmn.drop = (get_acc_qdel_us() > SBW_LATENCY_BUDGET);
-
-	if (!c->cmn.drop) {
-		srpc_handler((struct srpc_ctx *)c);
-	}
-
-	if (!c->cmn.drop) {
-		st = microtime() - st;
-		srpc_avg_st = (int)((1 - EWMA_WEIGHT) * srpc_avg_st + EWMA_WEIGHT * st);
-	}
-
-
-	/*
-	c->cmn.drop = false;
-
 	srpc_handler((struct srpc_ctx *)c);
 	st = microtime() - st;
 
 	srpc_avg_st = (int)((1 - EWMA_WEIGHT) * srpc_avg_st + EWMA_WEIGHT * st);
-	*/
+
 	spin_lock_np(&s->lock);
 	bitmap_set(s->completed_slots, c->cmn.idx);
 	th = s->sender_th;
 	s->sender_th = NULL;
 	spin_unlock_np(&s->lock);
-
-	if (c->cmn.drop)
-		atomic64_inc(&srpc_stat_req_dropped_);
-
 	if (th)
 		thread_ready(th);
 }
@@ -394,7 +376,6 @@ static void srpc_server(void *arg)
 {
 	tcpconn_t *c = (tcpconn_t *)arg;
 	struct ssd_session *s;
-	struct rpc_session_info info;
 	thread_t *th;
 	int ret;
 
@@ -402,12 +383,7 @@ static void srpc_server(void *arg)
 	BUG_ON(!s);
 	memset(s, 0, sizeof(*s));
 
-	/* receive session info */
-	ret = tcp_read_full(c, &info, sizeof(info));
-	BUG_ON(ret <= 0);
-
 	s->cmn.c = c;
-	s->cmn.session_type = info.session_type;
 	s->id = atomic_fetch_and_add(&srpc_num_sess, 1) + 1;
 	bitmap_init(s->avail_slots, SSD_MAX_WINDOW, true);
 
@@ -460,6 +436,8 @@ static void srpc_listener(void *arg)
 	srpc_avg_st = 0;
 
 	/* init stats */
+	atomic64_write(&srpc_stat_winu_rx_, 0);
+	atomic64_write(&srpc_stat_winu_tx_, 0);
 	atomic64_write(&srpc_stat_req_rx_, 0);
 	atomic64_write(&srpc_stat_resp_tx_, 0);
 
@@ -502,25 +480,19 @@ int ssd_enable(srpc_fn_t handler)
 	return 0;
 }
 
-void ssd_drop()
+uint64_t ssd_stat_winu_rx()
 {
-        struct srpc_ctx *ctx = (struct srpc_ctx *)get_rpc_ctx();
-	ctx->drop = true;
+	return atomic64_read(&srpc_stat_winu_rx_);
 }
 
-uint64_t ssd_stat_cupdate_rx()
+uint64_t ssd_stat_winu_tx()
 {
-	return 0;
+	return atomic64_read(&srpc_stat_winu_tx_);
 }
 
-uint64_t ssd_stat_ecredit_tx()
+uint64_t ssd_stat_win_tx()
 {
-	return 0;
-}
-
-uint64_t ssd_stat_credit_tx()
-{
-	return 0;
+	return atomic64_read(&srpc_stat_win_tx_);
 }
 
 uint64_t ssd_stat_req_rx()
@@ -540,10 +512,9 @@ uint64_t ssd_stat_resp_tx()
 
 struct srpc_ops ssd_ops = {
 	.srpc_enable		= ssd_enable,
-	.srpc_drop		= ssd_drop,
-	.srpc_stat_cupdate_rx	= ssd_stat_cupdate_rx,
-	.srpc_stat_ecredit_tx	= ssd_stat_ecredit_tx,
-	.srpc_stat_credit_tx	= ssd_stat_credit_tx,
+	.srpc_stat_winu_rx	= ssd_stat_winu_rx,
+	.srpc_stat_winu_tx	= ssd_stat_winu_tx,
+	.srpc_stat_win_tx	= ssd_stat_win_tx,
 	.srpc_stat_req_rx	= ssd_stat_req_rx,
 	.srpc_stat_req_dropped	= ssd_stat_req_dropped,
 	.srpc_stat_resp_tx	= ssd_stat_resp_tx,

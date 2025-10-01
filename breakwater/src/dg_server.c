@@ -101,6 +101,9 @@ struct sdg_session {
 };
 
 /* credit-related stats */
+atomic64_t srpc_stat_winu_rx_;
+atomic64_t srpc_stat_winu_tx_;
+atomic64_t srpc_stat_win_tx_;
 atomic64_t srpc_stat_req_rx_;
 atomic64_t srpc_stat_req_dropped_;
 atomic64_t srpc_stat_resp_tx_;
@@ -180,7 +183,7 @@ static int srpc_send_completion_vector(struct sdg_session *s,
 		char *buf;
 		uint8_t flags = 0;
 
-		if (!c->cmn.drop) {
+		if (!c->drop) {
 			len = c->cmn.resp_len;
 			buf = c->cmn.resp_buf;
 		} else {
@@ -223,6 +226,7 @@ static int srpc_send_completion_vector(struct sdg_session *s,
 #endif
 	atomic_sub_and_fetch(&srpc_num_pending, nrhdr);
 	atomic64_fetch_and_add(&srpc_stat_resp_tx_, nrhdr);
+	atomic64_fetch_and_add(&srpc_stat_win_tx_, 0);
 
 	if (unlikely(ret < 0))
 		return ret;
@@ -236,7 +240,7 @@ static void srpc_worker(void *arg)
 	uint64_t st = microtime();
 	thread_t *th;
 
-	c->cmn.drop = false;
+	c->drop = false;
 	srpc_handler((struct srpc_ctx *)c);
 	st = microtime() - st;
 
@@ -307,7 +311,7 @@ again:
 		if (chdr.prio > atomic_read(&dagor_prio_thresh)) {
 			thread_t *th;
 
-			s->slots[idx]->cmn.drop = true;
+			s->slots[idx]->drop = true;
 			spin_lock_np(&s->lock);
 			bitmap_set(s->completed_slots, idx);
 			th = s->sender_th;
@@ -413,7 +417,6 @@ static void srpc_server(void *arg)
 {
 	tcpconn_t *c = (tcpconn_t *)arg;
 	struct sdg_session *s;
-	struct rpc_session_info info;
 	thread_t *th;
 	int ret;
 
@@ -421,12 +424,7 @@ static void srpc_server(void *arg)
 	BUG_ON(!s);
 	memset(s, 0, sizeof(*s));
 
-	/* receive session info */
-	ret = tcp_read_full(c, &info, sizeof(info));
-	BUG_ON(ret <= 0);
-
 	s->cmn.c = c;
-	s->cmn.session_type = info.session_type;
 	s->id = atomic_fetch_and_add(&srpc_num_sess, 1) + 1;
 	bitmap_init(s->avail_slots, SDG_MAX_WINDOW, true);
 
@@ -515,6 +513,8 @@ static void srpc_listener(void *arg)
 	srpc_avg_st = 0;
 
 	/* init stats */
+	atomic64_write(&srpc_stat_winu_rx_, 0);
+	atomic64_write(&srpc_stat_winu_tx_, 0);
 	atomic64_write(&srpc_stat_req_rx_, 0);
 	atomic64_write(&srpc_stat_resp_tx_, 0);
 
@@ -557,19 +557,19 @@ int sdg_enable(srpc_fn_t handler)
 	return 0;
 }
 
-uint64_t sdg_stat_cupdate_rx()
+uint64_t sdg_stat_winu_rx()
 {
-	return 0;
+	return atomic64_read(&srpc_stat_winu_rx_);
 }
 
-uint64_t sdg_stat_ecredit_tx()
+uint64_t sdg_stat_winu_tx()
 {
-	return 0;
+	return atomic64_read(&srpc_stat_winu_tx_);
 }
 
-uint64_t sdg_stat_credit_tx()
+uint64_t sdg_stat_win_tx()
 {
-	return 0;
+	return atomic64_read(&srpc_stat_win_tx_);
 }
 
 uint64_t sdg_stat_req_rx()
@@ -589,9 +589,9 @@ uint64_t sdg_stat_resp_tx()
 
 struct srpc_ops sdg_ops = {
 	.srpc_enable		= sdg_enable,
-	.srpc_stat_cupdate_rx	= sdg_stat_cupdate_rx,
-	.srpc_stat_ecredit_tx	= sdg_stat_ecredit_tx,
-	.srpc_stat_credit_tx	= sdg_stat_credit_tx,
+	.srpc_stat_winu_rx	= sdg_stat_winu_rx,
+	.srpc_stat_winu_tx	= sdg_stat_winu_tx,
+	.srpc_stat_win_tx	= sdg_stat_win_tx,
 	.srpc_stat_req_rx	= sdg_stat_req_rx,
 	.srpc_stat_req_dropped	= sdg_stat_req_dropped,
 	.srpc_stat_resp_tx	= sdg_stat_resp_tx,
