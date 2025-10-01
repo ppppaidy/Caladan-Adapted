@@ -16,24 +16,21 @@ namespace rt {
 // Force the compiler to access a memory location.
 template<typename T>
 T volatile &access_once(T &t) {
-  static_assert(std::is_integral<T>::value || std::is_pointer<T>::value,
-                "Integral or pointer required.");
+  static_assert(std::is_integral<T>::value, "Integral required.");
   return static_cast<T volatile &>(t);
 }
 
 // Force the compiler to read a memory location.
 template<typename T>
 T read_once(const T &p) {
-  static_assert(std::is_integral<T>::value || std::is_pointer<T>::value,
-                "Integral or pointer required.");
+  static_assert(std::is_integral<T>::value, "Integral required.");
   return static_cast<const T volatile &>(p);
 }
 
 // Force the compiler to write a memory location.
 template<typename T>
 void write_once(T &p, const T &val) {
-  static_assert(std::is_integral<T>::value || std::is_pointer<T>::value,
-                "Integral or pointer required.");
+  static_assert(std::is_integral<T>::value, "Integral required.");
   static_cast<T volatile &>(p) = val;
 }
 
@@ -63,13 +60,12 @@ class ThreadWaker {
   // immediate future).
   void Wake(bool head = false) {
     if (th_ == nullptr) return;
-    thread_t *th = th_;
-    th_ = nullptr;
     if (head) {
-      thread_ready_head(th);
+      thread_ready_head(th_);
     } else {
-      thread_ready(th);
+      thread_ready(th_);
     }
+    th_ = nullptr;
   }
 
  private:
@@ -168,6 +164,8 @@ class Mutex {
   // Unlocks the mutex.
   void Unlock() { mutex_unlock(&mu_); }
 
+  uint64_t QueueUS() { return mutex_queue_us(&mu_); }
+
   // Locks the mutex only if it is currently unlocked. Returns true if
   // successful.
   bool TryLock() { return mutex_try_lock(&mu_); }
@@ -180,48 +178,6 @@ class Mutex {
 
   Mutex(const Mutex&) = delete;
   Mutex& operator=(const Mutex&) = delete;
-};
-
-// std::timed_mutex-like timed mutex support.
-class TimedMutex {
-  friend class TimedCondVar;
-
- public:
-  TimedMutex() { timed_mutex_init(&mu_); }
-  ~TimedMutex() { assert(!timed_mutex_held(&mu_)); }
-
-  // Locks the mutex.
-  void Lock() { timed_mutex_lock(&mu_); }
-
-  // Unlocks the mutex.
-  void Unlock() { timed_mutex_unlock(&mu_); }
-
-  // Locks the mutex only if it is currently unlocked. Returns true if
-  // successful.
-  bool TryLock() { return timed_mutex_try_lock(&mu_); }
-
-  // Returns true if the mutex is currently held.
-  bool IsHeld() { return timed_mutex_held(&mu_); }
-
-  // Tries to lock the mutex. Blocks until specified duration has elapsed or
-  // the lock is acquired, whichever comes first. On successful lock acquisition
-  // returns true, otherwise returns false.
-  bool TryLockFor(uint64_t duration_us) {
-    return timed_mutex_try_lock_for(&mu_, duration_us);
-  }
-
-  // Tries to lock the mutex. Blocks until specified deadline has been reached
-  // or the lock is acquired, whichever comes first. On successful lock
-  // acquisition returns true, otherwise returns false.
-  bool TryLockUntil(uint64_t deadline_us) {
-    return timed_mutex_try_lock_until(&mu_, deadline_us);
-  }
-
- private:
-  timed_mutex_t mu_;
-
-  TimedMutex(const TimedMutex&) = delete;
-  TimedMutex& operator=(const TimedMutex&) = delete;
 };
 
 // RAII lock support (works with Spin, Preempt, and Mutex).
@@ -261,18 +217,10 @@ template <typename L>
 class ScopedLockAndPark {
  public:
   explicit ScopedLockAndPark(L *lock) : lock_(lock) { lock_->Lock(); }
-  ~ScopedLockAndPark() {
-    if (lock_) {
-      lock_->UnlockAndPark();
-    }
-  }
-  void reset() {
-    lock_->Unlock();
-    lock_ = nullptr;
-  }
+  ~ScopedLockAndPark() { lock_->UnlockAndPark(); }
 
  private:
-  L *lock_;
+  L *const lock_;
 
   ScopedLockAndPark(const ScopedLockAndPark&) = delete;
   ScopedLockAndPark& operator=(const ScopedLockAndPark&) = delete;
@@ -291,54 +239,23 @@ class CondVar {
   // after wakeup, as no guarantees are made about preventing spurious wakeups.
   void Wait(Mutex *mu) { condvar_wait(&cv_, &mu->mu_); }
 
+  void TimedWait(Mutex *mu, uint64_t timeout_us) {
+    condvar_timed_wait(&cv_, &mu->mu_, timeout_us);
+  }
+
   // Wake up one waiter.
   void Signal() { condvar_signal(&cv_); }
 
   // Wake up all waiters.
   void SignalAll() { condvar_broadcast(&cv_); }
 
+  uint64_t QueueUS() { return condvar_queue_us(&cv_); }
+
  private:
   condvar_t cv_;
 
   CondVar(const CondVar&) = delete;
   CondVar& operator=(const CondVar&) = delete;
-};
-
-// A CondVar variant that supports WaitFor() and WaitUntil().
-class TimedCondVar {
- public:
-  TimedCondVar() { timed_condvar_init(&cv_); };
-  ~TimedCondVar() {}
-
-  // Block until the condition variable is signaled. Recheck the condition
-  // after wakeup, as no guarantees are made about preventing spurious wakeups.
-  void Wait(TimedMutex *mu) { timed_condvar_wait(&cv_, &mu->mu_); }
-
-  // Causes the current thread to block until the condition variable is
-  // notified, a specific duration is elapsed, or a spurious wakeup occurs.
-  // Returns false if the duration has been elapsed. Otherwise, returns true.
-  bool WaitFor(TimedMutex *mu, uint64_t duration_us) {
-    return timed_condvar_wait_for(&cv_, &mu->mu_, duration_us);
-  }
-
-  // Causes the current thread to block until the condition variable is
-  // notified, a specific deadline is reached, or a spurious wakeup occurs.
-  // Returns false if the deadline has been reached. Otherwise, returns true.
-  bool WaitUntil(TimedMutex *mu, uint64_t deadline_us) {
-    return timed_condvar_wait_until(&cv_, &mu->mu_, deadline_us);
-  }
-
-  // Wake up one waiter.
-  void Signal() { timed_condvar_signal(&cv_); }
-
-  // Wake up all waiters.
-  void SignalAll() { timed_condvar_broadcast(&cv_); }
-
-private:
-  timed_condvar_t cv_;
-
-  TimedCondVar(const TimedCondVar&) = delete;
-  TimedCondVar& operator=(const TimedCondVar&) = delete;
 };
 
 // Golang-like waitgroup support.
@@ -353,7 +270,7 @@ class WaitGroup {
     waitgroup_add(&wg_, count);
   }
 
-  ~WaitGroup() { assert(wg_.cnt == 0); };
+  ~WaitGroup() { assert(wg_.cnt == 0); }
 
   // Changes the number of jobs (can be negative).
   void Add(int count) { waitgroup_add(&wg_, count); }

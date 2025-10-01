@@ -4,8 +4,8 @@
 
 #include <base/lock.h>
 #include <base/log.h>
-#include <runtime/sync.h>
 #include <runtime/thread.h>
+#include <runtime/sync.h>
 #include <runtime/timer.h>
 
 #include "defs.h"
@@ -16,6 +16,29 @@
  */
 
 #define WAITER_FLAG (1 << 31)
+
+/**
+ * mutex_queue_tsc - returns mutex queueing delay
+ * @m: the mutex to get queueing delay
+ */
+uint64_t mutex_queue_tsc(mutex_t *m)
+{
+	uint64_t cur_tsc = rdtsc();
+	if (cur_tsc < m->oldest_tsc) {
+		return 0;
+	}
+
+	return (cur_tsc - m->oldest_tsc);
+}
+
+/**
+ * mutex_queue_us - returns mutex queueing delay in us
+ * @m: the mutex to get queueing delay
+ */
+uint64_t mutex_queue_us(mutex_t *m)
+{
+	return mutex_queue_tsc(m) / cycles_per_us;
+}
 
 void __mutex_lock(mutex_t *m)
 {
@@ -31,7 +54,12 @@ void __mutex_lock(mutex_t *m)
 	}
 
 	myth = thread_self();
+	bool is_first = list_empty(&m->waiters);
+	myth->ready_tsc = rdtsc();
+	myth->enque_ts = myth->ready_tsc;
 	list_add_tail(&m->waiters, &myth->link);
+	if (is_first)
+		m->oldest_tsc = myth->ready_tsc;
 	thread_park_and_unlock_np(&m->waiter_lock);
 }
 
@@ -48,7 +76,15 @@ void __mutex_unlock(mutex_t *m)
 		spin_unlock_np(&m->waiter_lock);
 		return;
 	}
+
+	if (list_empty(&m->waiters)) {
+		m->oldest_tsc = UINT64_MAX;
+	} else {
+		thread_t *oldest_th = list_top(&m->waiters, thread_t, link);
+		m->oldest_tsc = oldest_th->ready_tsc;
+	}
 	spin_unlock_np(&m->waiter_lock);
+	waketh->acc_qdel += (rdtsc() - waketh->enque_ts);
 	thread_ready(waketh);
 }
 
@@ -61,110 +97,9 @@ void mutex_init(mutex_t *m)
 	atomic_write(&m->held, 0);
 	spin_lock_init(&m->waiter_lock);
 	list_head_init(&m->waiters);
+	m->oldest_tsc = UINT64_MAX;
 }
 
-/*
- * Timed mutex support
- */
-
-struct timed_mutex_waiter {
-	bool                    acquired;
-	thread_t                *th;
-	spinlock_t		*waiter_lock;
-	struct list_node	link;
-};
-
-void __timed_mutex_lock(timed_mutex_t *m)
-{
-	struct timed_mutex_waiter waiter;
-
-	spin_lock_np(&m->waiter_lock);
-
-	/* did we race with mutex_unlock? */
-	if (atomic_fetch_and_or(&m->held, WAITER_FLAG) == 0) {
-		atomic_write(&m->held, 1);
-		spin_unlock_np(&m->waiter_lock);
-		return;
-	}
-
-	waiter.th = thread_self();
-	list_add_tail(&m->waiters, &waiter.link);
-	thread_park_and_unlock_np(&m->waiter_lock);
-}
-
-void __timed_mutex_unlock(timed_mutex_t *m)
-{
-	struct timed_mutex_waiter *waiter;
-
-	spin_lock_np(&m->waiter_lock);
-
-	waiter = list_pop(&m->waiters, struct timed_mutex_waiter, link);
-	if (!waiter) {
-		atomic_write(&m->held, 0);
-		spin_unlock_np(&m->waiter_lock);
-		return;
-	}
-	waiter->acquired = true;
-	spin_unlock_np(&m->waiter_lock);
-	thread_ready(waiter->th);
-}
-
-void timed_mutex_callback(unsigned long arg)
-{
-	struct timed_mutex_waiter *waiter = (struct timed_mutex_waiter *)arg;
-
-	spin_lock_np(waiter->waiter_lock);
-	if (waiter->acquired) {
-		spin_unlock_np(waiter->waiter_lock);
-		return;
-	}
-	list_del(&waiter->link);
-	spin_unlock_np(waiter->waiter_lock);
-	thread_ready(waiter->th);
-}
-
-bool __timed_mutex_try_lock_until(timed_mutex_t *m, uint64_t deadline_us)
-{
-	struct timed_mutex_waiter waiter;
-	struct timer_entry entry;
-
-	if (unlikely(microtime() >= deadline_us))
-		return false;
-
-	spin_lock_np(&m->waiter_lock);
-
-	/* did we race with timed_mutex_unlock? */
-	if (atomic_fetch_and_or(&m->held, WAITER_FLAG) == 0) {
-		atomic_write(&m->held, 1);
-		spin_unlock_np(&m->waiter_lock);
-		return true;
-	}
-
-	waiter.acquired = false;
-	waiter.th = thread_self();
-	waiter.waiter_lock = &m->waiter_lock;
-	list_add_tail(&m->waiters, &waiter.link);
-
-	timer_init(&entry, timed_mutex_callback, (unsigned long)(&waiter));
-	timer_start(&entry, deadline_us);
-	thread_park_and_unlock_np(&m->waiter_lock);
-
-	if (!waiter.acquired)
-		return false;
-	timer_cancel(&entry);
-	return true;
-}
-
-/**
- * timed_mutex_init - initializes a timed mutex
- * @m: the timed mutex to initialize
- */
-void timed_mutex_init(timed_mutex_t *m)
-{
-	atomic_write(&m->held, 0);
-	spin_lock_init(&m->waiter_lock);
-	list_head_init(&m->waiters);
-}
 
 /*
  * Read-write mutex support
@@ -322,10 +257,76 @@ void condvar_wait(condvar_t *cv, mutex_t *m)
 	spin_lock_np(&cv->waiter_lock);
 	myth = thread_self();
 	mutex_unlock(m);
+	bool is_first = list_empty(&cv->waiters);
+	myth->ready_tsc = rdtsc();
+	myth->enque_ts = myth->ready_tsc;
 	list_add_tail(&cv->waiters, &myth->link);
+	if (is_first)
+		cv->oldest_tsc = myth->ready_tsc;
 	thread_park_and_unlock_np(&cv->waiter_lock);
 
 	mutex_lock(m);
+}
+
+struct condvar_timed_wait_args {
+	thread_t *th;
+	condvar_t *cv;
+};
+
+static void condvar_timed_wait_expired(unsigned long args) {
+	struct condvar_timed_wait_args *t_args =
+		(struct condvar_timed_wait_args *)args;
+	thread_t *th = t_args->th;
+	condvar_t *cv = t_args->cv;
+	thread_t *waiter = NULL;
+
+	// see if still th is in the waiter lists
+	spin_lock_np(&cv->waiter_lock);
+	list_for_each(&cv->waiters, waiter, link) {
+		if (waiter == th) {
+			list_del(&waiter->link);
+			break;
+		}
+	}
+	if (list_empty(&cv->waiters)) {
+		cv->oldest_tsc = UINT64_MAX;
+	} else {
+		thread_t *oldest_th = list_top(&cv->waiters, thread_t, link);
+		cv->oldest_tsc = oldest_th->ready_tsc;
+	}
+	spin_unlock_np(&cv->waiter_lock);
+
+	if (waiter == th) {
+		th->acc_qdel += (rdtsc() - th->enque_ts);
+		thread_ready(th);
+	}
+}
+
+/**
+ * condvar_timed_wait - waits for a condition variable to be signalled
+ * or for a timer to be expired.
+ * @cv: the condition variable to wait for
+ * @m: the currently held mutex that projects the condition
+ * @timeout_us: amount time to wait for
+ */
+void condvar_timed_wait(condvar_t *cv, mutex_t *m, uint64_t timeout_us)
+{
+	struct kthread *k;
+	struct timer_entry e;
+	struct condvar_timed_wait_args args = {thread_self(), cv};
+	uint64_t deadline_us = microtime() + timeout_us;
+
+	assert_mutex_held(m);
+
+	// schedule timer
+	timer_init(&e, condvar_timed_wait_expired, (unsigned long)&args);
+	timer_start(&e, deadline_us);
+
+	// wait for signal
+	condvar_wait(cv, m);
+
+	// cancel timer
+	timer_cancel(&e);
 }
 
 /**
@@ -338,9 +339,17 @@ void condvar_signal(condvar_t *cv)
 
 	spin_lock_np(&cv->waiter_lock);
 	waketh = list_pop(&cv->waiters, thread_t, link);
+	if (list_empty(&cv->waiters)) {
+		cv->oldest_tsc = UINT64_MAX;
+	} else {
+		thread_t *oldest_th = list_top(&cv->waiters, thread_t, link);
+		cv->oldest_tsc = oldest_th->ready_tsc;
+	}
 	spin_unlock_np(&cv->waiter_lock);
-	if (waketh)
+	if (waketh) {
+		waketh->acc_qdel += (rdtsc() - waketh->enque_ts);
 		thread_ready(waketh);
+	}
 }
 
 /**
@@ -356,12 +365,14 @@ void condvar_broadcast(condvar_t *cv)
 
 	spin_lock_np(&cv->waiter_lock);
 	list_append_list(&tmp, &cv->waiters);
+	cv->oldest_tsc = UINT64_MAX;
 	spin_unlock_np(&cv->waiter_lock);
 
 	while (true) {
 		waketh = list_pop(&tmp, thread_t, link);
 		if (!waketh)
 			break;
+		waketh->acc_qdel += (rdtsc() - waketh->enque_ts);
 		thread_ready(waketh);
 	}
 }
@@ -374,146 +385,29 @@ void condvar_init(condvar_t *cv)
 {
 	spin_lock_init(&cv->waiter_lock);
 	list_head_init(&cv->waiters);
-}
-
-/*
- * A Condition variable variant that supports wait_for() and wait_until().
- */
-
-struct timed_condvar_waiter {
-	bool                    signalled;
-	thread_t                *th;
-	spinlock_t		*waiter_lock;
-	struct list_node	link;
-};
-
-/**
- * timed_condvar_wait - waits for a condition variable to be signalled
- * @cv: the condition variable to wait for
- * @m: the currently held mutex that projects the condition
- */
-void timed_condvar_wait(timed_condvar_t *cv, timed_mutex_t *m)
-{
-	struct timed_condvar_waiter waiter;
-
-	assert_timed_mutex_held(m);
-	spin_lock_np(&cv->waiter_lock);
-	waiter.th = thread_self();
-	timed_mutex_unlock(m);
-	list_add_tail(&cv->waiters, &waiter.link);
-	thread_park_and_unlock_np(&cv->waiter_lock);
-
-	timed_mutex_lock(m);
+	cv->oldest_tsc = UINT64_MAX;
 }
 
 /**
- * timed_condvar_signal - signals a thread waiting on a condition variable
- * @cv: the condition variable to signal
+ * condvar_queue_tsc - returns condvar queueing delay
+ * @cv: the condvar to get queueing delay
  */
-void timed_condvar_signal(timed_condvar_t *cv)
+uint64_t condvar_queue_tsc(condvar_t *cv)
 {
-	struct timed_condvar_waiter *waiter;
+	uint64_t cur_tsc = rdtsc();
+	if (cur_tsc < cv->oldest_tsc)
+		return 0;
 
-	spin_lock_np(&cv->waiter_lock);
-	waiter = list_pop(&cv->waiters, struct timed_condvar_waiter, link);
-	if (waiter) {
-		waiter->signalled = true;
-	}
-	spin_unlock_np(&cv->waiter_lock);
-	if (waiter) {
-		thread_ready(waiter->th);
-	}
+	return (cur_tsc - cv->oldest_tsc);
 }
 
 /**
- * timed_condvar_broadcast - signals all waiting threads on a condition variable
- * @cv: the condition variable to signal
+ * condvar_queue_tsc - returns condvar queueing delay in us
+ * @cv: the condvar to get queueing delay
  */
-void timed_condvar_broadcast(timed_condvar_t *cv)
+uint64_t condvar_queue_us(condvar_t *cv)
 {
-	struct timed_condvar_waiter *waiter;
-	struct list_head tmp;
-
-	list_head_init(&tmp);
-
-	spin_lock_np(&cv->waiter_lock);
-	list_for_each(&cv->waiters, waiter, link) {
-		waiter->signalled = true;
-	}
-	list_append_list(&tmp, &cv->waiters);
-	spin_unlock_np(&cv->waiter_lock);
-
-	while (true) {
-		waiter = list_pop(&tmp, struct timed_condvar_waiter, link);
-		if (!waiter)
-			break;
-		thread_ready(waiter->th);
-	}
-}
-
-void timed_condvar_callback(unsigned long arg)
-{
-	struct timed_condvar_waiter *waiter =
-		(struct timed_condvar_waiter *)arg;
-
-	spin_lock_np(waiter->waiter_lock);
-	if (waiter->signalled) {
-		spin_unlock_np(waiter->waiter_lock);
-		return;
-	}
-	list_del(&waiter->link);
-	spin_unlock_np(waiter->waiter_lock);
-	thread_ready(waiter->th);
-}
-
-/**
- * timed_condvar_wait_until - causes the current thread to block until the
- * condition variable is notified, a specific time is reached, or a spurious
- * wakeup occurs.
- *
- * @cv: the condition variable to signal
- * @m: the currently held mutex that projects the condition
- * @deadline_us: the deadline in microsecond.
- *
- * Returns false if the deadline has been reached. Otherwise, returns true.
- */
-bool timed_condvar_wait_until(timed_condvar_t *cv, timed_mutex_t *m,
-                              uint64_t deadline_us)
-{
-	struct timed_condvar_waiter waiter;
-	struct timer_entry entry;
-
-	if (unlikely(microtime() >= deadline_us))
-		return false;
-
-	assert_timed_mutex_held(m);
-	spin_lock_np(&cv->waiter_lock);
-	waiter.signalled = false;
-	waiter.th = thread_self();
-	waiter.waiter_lock = &cv->waiter_lock;
-	timed_mutex_unlock(m);
-	list_add_tail(&cv->waiters, &waiter.link);
-
-	timer_init(&entry, timed_condvar_callback, (unsigned long)(&waiter));
-	timer_start(&entry, deadline_us);
-	thread_park_and_unlock_np(&cv->waiter_lock);
-	timed_mutex_lock(m);
-
-	if (!waiter.signalled)
-		return false;
-	timer_cancel(&entry);
-
-	return true;
-}
-
-/**
- * timed_condvar_init - initializes a condition variable
- * @cv: the condition variable to initialize
- */
-void timed_condvar_init(timed_condvar_t *cv)
-{
-	spin_lock_init(&cv->waiter_lock);
-	list_head_init(&cv->waiters);
+	return condvar_queue_tsc(cv) / cycles_per_us;
 }
 
 

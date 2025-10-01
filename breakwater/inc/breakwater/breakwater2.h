@@ -17,6 +17,9 @@ struct sbw_ctx {
 	uint64_t		ts_sent;
 };
 
+typedef uint64_t (*get_delay_fn_t)(void);
+void sbw2_register_delay_source(int stype, get_delay_fn_t dfn);
+
 struct cbw_session;
 /* for RPC client-connection */
 struct cbw_conn {

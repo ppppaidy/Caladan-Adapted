@@ -4,12 +4,12 @@
 
 #pragma once
 
+#include <base/stddef.h>
 #include <base/list.h>
 #include <base/lock.h>
-#include <base/stddef.h>
-#include <base/time.h>
-#include <runtime/preempt.h>
 #include <runtime/thread.h>
+#include <runtime/preempt.h>
+
 
 /*
  * Mutex support
@@ -19,10 +19,13 @@ struct mutex {
 	atomic_t		held;
 	spinlock_t		waiter_lock;
 	struct list_head	waiters;
+	uint64_t		oldest_tsc;
 };
 
 typedef struct mutex mutex_t;
 
+extern uint64_t mutex_queue_tsc(mutex_t *m);
+extern uint64_t mutex_queue_us(mutex_t *m);
 extern void __mutex_lock(mutex_t *m);
 extern void __mutex_unlock(mutex_t *m);
 extern void mutex_init(mutex_t *m);
@@ -65,7 +68,7 @@ static inline void mutex_unlock(mutex_t *m)
  * mutex_held - is the mutex currently held?
  * @m: the mutex to check
  */
-static inline bool mutex_held(const mutex_t *m)
+static inline bool mutex_held(mutex_t *m)
 {
 	return atomic_read(&m->held);
 }
@@ -79,119 +82,6 @@ static inline void assert_mutex_held(mutex_t *m)
 	assert(mutex_held(m));
 }
 
-/*
- * Timed mutex support
- */
-
-struct timed_mutex {
-	atomic_t		held;
-	spinlock_t		waiter_lock;
-	struct list_head	waiters;
-};
-
-typedef struct timed_mutex timed_mutex_t;
-
-extern void __timed_mutex_lock(timed_mutex_t *m);
-extern void __timed_mutex_unlock(timed_mutex_t *m);
-extern bool __timed_mutex_try_lock_until(timed_mutex_t *m,
-                                         uint64_t deadline_us);
-extern void timed_mutex_init(timed_mutex_t *m);
-
-/**
- * timed_mutex_try_lock - attempts to acquire a timed mutex
- * @m: the timed mutex to acquire
- *
- * Returns true if the acquire was successful.
- */
-static inline bool timed_mutex_try_lock(timed_mutex_t *m)
-{
-	return atomic_cmpxchg(&m->held, 0, 1);
-}
-
-static inline bool __timed_mutex_try_lock_for(timed_mutex_t *m,
-                                              uint64_t duration_us)
-{
-	return __timed_mutex_try_lock_until(m, microtime() + duration_us);
-}
-
-/**
- * timed_mutex_try_lock_for - attempts to acquire a timed mutex. Blocks until
- * specified duration has elapsed or the lock is acquired, whichever comes
- * first.
- * @m: the timed mutex to acquire
- * @duration_us: the duration in microseconds.
- *
- * Returns true if the acquire was successful.
- */
-static inline bool timed_mutex_try_lock_for(timed_mutex_t *m,
-                                            uint64_t duration_us)
-{
-	if (timed_mutex_try_lock(m)) {
-		return true;
-	}
-	return __timed_mutex_try_lock_for(m, duration_us);
-}
-
-/**
- * timed_mutex_try_lock_until - attempts to acquire a timed mutex. Blocks until
- * specified deadline has been reached or the lock is acquired, whichever comes
- * first.
- * @m: the timed mutex to acquire
- * @deadline_us: the deadline in microseconds.
- *
- * Returns true if the acquire was successful.
- */
-static inline bool timed_mutex_try_lock_until(timed_mutex_t *m,
-                                              uint64_t deadline_us)
-{
-	if (timed_mutex_try_lock(m)) {
-		return true;
-	}
-	return __timed_mutex_try_lock_until(m, deadline_us);
-}
-
-/**
- * timed_mutex_lock - acquires a timed mutex
- * @m: the timed mutex to acquire
- */
-static inline void timed_mutex_lock(timed_mutex_t *m)
-{
-	if (likely(atomic_cmpxchg(&m->held, 0, 1)))
-		return;
-
-	__timed_mutex_lock(m);
-}
-
-/**
- * timed_mutex_unlock - releases a timed mutex
- * @m: the timed mutex to release
- */
-static inline void timed_mutex_unlock(timed_mutex_t *m)
-{
-	if (likely(atomic_cmpxchg(&m->held, 1, 0)))
-		return;
-
-	__timed_mutex_unlock(m);
-}
-
-/**
- * timed_mutex_held - is the timed mutex currently held?
- * @m: the timed mutex to check
- */
-static inline bool timed_mutex_held(timed_mutex_t *m)
-{
-	return atomic_read(&m->held);
-}
-
-/**
- * assert_timed_mutex_held - asserts that a timed mutex is currently held
- * @m: the timed mutex that must be held
- */
-static inline void assert_timed_mutex_held(timed_mutex_t *m)
-{
-	assert(timed_mutex_held(m));
-}
-
 
 /*
  * Condition variable support
@@ -200,49 +90,21 @@ static inline void assert_timed_mutex_held(timed_mutex_t *m)
 struct condvar {
 	spinlock_t		waiter_lock;
 	struct list_head	waiters;
+	uint64_t		oldest_tsc;
 };
 
 typedef struct condvar condvar_t;
 
 extern void condvar_wait(condvar_t *cv, mutex_t *m);
+extern void condvar_timed_wait(condvar_t *cv, mutex_t *m,
+			       uint64_t timeout_us);
 extern void condvar_signal(condvar_t *cv);
 extern void condvar_broadcast(condvar_t *cv);
 extern void condvar_init(condvar_t *cv);
 
-/*
- * A condition variable variant that supports wait_for() and wait_until().
- */
+extern uint64_t condvar_queue_tsc(condvar_t *cv);
+extern uint64_t condvar_queue_us(condvar_t *cv);
 
-struct timed_condvar {
-	spinlock_t		waiter_lock;
-	struct list_head	waiters;
-};
-
-typedef struct timed_condvar timed_condvar_t;
-
-extern void timed_condvar_wait(timed_condvar_t *cv, timed_mutex_t *m);
-extern bool timed_condvar_wait_until(timed_condvar_t *cv, timed_mutex_t *m,
-                                     uint64_t deadline_us);
-extern void timed_condvar_signal(timed_condvar_t *cv);
-extern void timed_condvar_broadcast(timed_condvar_t *cv);
-extern void timed_condvar_init(timed_condvar_t *cv);
-
-/**
- * timed_condvar_wait_for - causes the current thread to block until the
- * condition variable is notified, a specific duration elapsed reached, or a
- * spurious wakeup occurs.
- *
- * @cv: the condition variable to signal
- * @m: the currently held mutex that projects the condition
- * @duration_us: the duration in microsecond.
- *
- * Returns false if the duration has been elapsed. Otherwise, returns true.
- */
-static inline bool timed_condvar_wait_for(timed_condvar_t *cv, timed_mutex_t *m,
-                                          uint64_t duration_us)
-{
-	return timed_condvar_wait_until(cv, m, microtime() + duration_us);
-}
 
 /*
  * Wait group support
