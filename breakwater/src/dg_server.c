@@ -62,23 +62,23 @@ static struct Event events[TS_BUF_SIZE];
 static srpc_fn_t srpc_handler;
 
 /* total number of session */
-atomic_t srpc_num_sess;
+static atomic_t srpc_num_sess;
 
 /* the number of active sessions */
-atomic_t srpc_num_active;
+static atomic_t srpc_num_active;
 
 /* the number of pending requests */
-atomic_t srpc_num_pending;
+static atomic_t srpc_num_pending;
 
 /* average service time in us */
-int srpc_avg_st;
+static int srpc_avg_st;
 
 /* dagor-related variables */
-uint64_t last_prio_update;
-double dagor_prio_;
-int dagor_delay;
-atomic_t dagor_prio_thresh;
-atomic_t dagor_num_reqs;
+static uint64_t last_prio_update;
+static double dagor_prio_;
+static int dagor_delay;
+static atomic_t dagor_prio_thresh;
+static atomic_t dagor_num_reqs;
 
 struct sdg_session {
 	struct srpc_session	cmn;
@@ -101,12 +101,12 @@ struct sdg_session {
 };
 
 /* credit-related stats */
-atomic64_t srpc_stat_winu_rx_;
-atomic64_t srpc_stat_winu_tx_;
-atomic64_t srpc_stat_win_tx_;
-atomic64_t srpc_stat_req_rx_;
-atomic64_t srpc_stat_req_dropped_;
-atomic64_t srpc_stat_resp_tx_;
+static atomic64_t srpc_stat_winu_rx_;
+static atomic64_t srpc_stat_winu_tx_;
+static atomic64_t srpc_stat_win_tx_;
+static atomic64_t srpc_stat_req_rx_;
+static atomic64_t srpc_stat_req_dropped_;
+static atomic64_t srpc_stat_resp_tx_;
 
 #if SDG_TS_OUT
 static void printRecord()

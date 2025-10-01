@@ -62,24 +62,24 @@ static struct Event events[TS_BUF_SIZE];
 static srpc_fn_t srpc_handler;
 
 /* total number of session */
-atomic_t srpc_num_sess;
+static atomic_t srpc_num_sess;
 
 /* the number of drained session */
-atomic_t srpc_num_drained;
+static atomic_t srpc_num_drained;
 
 /* the number of active sessions */
-atomic_t srpc_num_active;
+static atomic_t srpc_num_active;
 
 /* global window available */
-atomic_t srpc_win_avail;
+static atomic_t srpc_win_avail;
 
 /* global window used */
-atomic_t srpc_win_used;
+static atomic_t srpc_win_used;
 
 /* the number of pending requests */
-atomic_t srpc_num_pending;
+static atomic_t srpc_num_pending;
 
-double win_carry;
+static double win_carry;
 
 /* drained session list */
 struct srpc_drained_ {
@@ -125,12 +125,12 @@ struct sbw_session {
 };
 
 /* credit-related stats */
-atomic64_t srpc_stat_winu_rx_;
-atomic64_t srpc_stat_winu_tx_;
-atomic64_t srpc_stat_win_tx_;
-atomic64_t srpc_stat_req_rx_;
-atomic64_t srpc_stat_req_dropped_;
-atomic64_t srpc_stat_resp_tx_;
+static atomic64_t srpc_stat_winu_rx_;
+static atomic64_t srpc_stat_winu_tx_;
+static atomic64_t srpc_stat_win_tx_;
+static atomic64_t srpc_stat_req_rx_;
+static atomic64_t srpc_stat_req_dropped_;
+static atomic64_t srpc_stat_resp_tx_;
 
 #if SBW_TS_OUT
 static void printRecord()
