@@ -10,3 +10,6 @@
 [submodule "deps/pcm"]
 	path = deps/pcm
 	url = https://github.com/opcm/pcm.git
+[submodule "spdk"]
+	path = spdk
+	url = https://github.com/spdk/spdk.git
