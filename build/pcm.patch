@@ -138,10 +138,10 @@ index 12f7fdf..abb461a 100644
      //! \brief Returns true if the specified core C-state residency metric is supported
 diff --git a/pcm-caladan.cpp b/pcm-caladan.cpp
 new file mode 100644
-index 0000000..896f2a4
+index 0000000..90f21c1
 --- /dev/null
 +++ b/pcm-caladan.cpp
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,38 @@
 +
 +#include "cpucounters.h"
 +
@@ -156,6 +156,11 @@ index 0000000..896f2a4
 +	uint32_t pcm_caladan_get_cas_count(uint32 channel)
 +	{
 +		return caladan_cfg->getMCCounter(channel, 0);
++	}
++
++	uint32_t pcm_caladan_get_channel_count(void)
++	{
++		return cpcm->getMCChannelsPerSocket();
 +	}
 +
 +	uint32_t pcm_caladan_get_active_channel_count(void)
