@@ -4,5 +4,6 @@
 extern uint32_t pcm_caladan_get_cas_count(uint32_t channel);
 extern uint32_t pcm_caladan_get_channel_count(void);
 extern uint32_t pcm_caladan_get_active_channel_count(void);
+extern size_t pcm_caladan_get_msr_num();
 extern int pcm_caladan_init(int socket);
 

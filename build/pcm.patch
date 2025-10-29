@@ -116,21 +116,23 @@ index 5ae2bd8..93d2c46 100644
 \ No newline at end of file
 +} // namespace pcm
 diff --git a/cpucounters.h b/cpucounters.h
-index 12f7fdf..abb461a 100644
+index 12f7fdf..ac1c326 100644
 --- a/cpucounters.h
 +++ b/cpucounters.h
-@@ -567,7 +567,6 @@ class PCM_API PCM
+@@ -566,8 +566,6 @@ class PCM_API PCM
+     static PCM * instance;
      bool allow_multiple_instances;
      bool programmed_pmu;
-     std::vector<std::shared_ptr<SafeMsrHandle> > MSR;
+-    std::vector<std::shared_ptr<SafeMsrHandle> > MSR;
 -    std::vector<std::shared_ptr<ServerPCICFGUncore> > server_pcicfg_uncore;
      std::vector<UncorePMU> pcuPMUs;
      std::vector<std::map<int32, UncorePMU> > iioPMUs;
      std::vector<UncorePMU> uboxPMUs;
-@@ -604,6 +603,8 @@ class PCM_API PCM
+@@ -604,6 +602,9 @@ class PCM_API PCM
      bool forceRTMAbortMode;
  
  public:
++    std::vector<std::shared_ptr<SafeMsrHandle> > MSR;
 +    std::vector<std::shared_ptr<ServerPCICFGUncore> > server_pcicfg_uncore;
 +
      enum { MAX_C_STATE = 10 }; // max C-state on Intel architecture
@@ -138,10 +140,10 @@ index 12f7fdf..abb461a 100644
      //! \brief Returns true if the specified core C-state residency metric is supported
 diff --git a/pcm-caladan.cpp b/pcm-caladan.cpp
 new file mode 100644
-index 0000000..90f21c1
+index 0000000..9b72550
 --- /dev/null
 +++ b/pcm-caladan.cpp
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,42 @@
 +
 +#include "cpucounters.h"
 +
@@ -169,6 +171,10 @@ index 0000000..90f21c1
 +		for (uint32_t i = 0; i < cpcm->getMCChannelsPerSocket(); i++)
 +			count += pcm_caladan_get_cas_count(i) != 0;
 +		return count;
++	}
++
++	size_t pcm_caladan_get_msr_num() {
++		return cpcm->MSR.size();
 +	}
 +
 +	int pcm_caladan_init(int socket)
