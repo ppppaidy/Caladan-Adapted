@@ -22,4 +22,6 @@ echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 # Disable turbo boost
 echo 1 | tee /sys/devices/system/cpu/intel_pstate/no_turbo
 
+echo -1 | tee /proc/sys/kernel/perf_event_paranoid
+
 popd
